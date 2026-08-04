@@ -1,0 +1,4 @@
+# Runtime needs no pip packages: the tools use the standard library plus
+# PyGObject, which comes from the distribution (python3-gi, gir1.2-gtk-3.0).
+# Only the test runner is installed with pip.
+pytest>=7.0

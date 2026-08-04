@@ -1,0 +1,228 @@
+#!/bin/bash
+# freeze-guard - inspect and control the freeze protection.
+# The command is also reachable as `vfg` (alias symlink).
+set -u
+
+SRC_DIR="$(dirname "$(readlink -f "$0")")"
+# Installed names have no suffix; in the repository the two Python entry points
+# are run.py and run-monitor.py.
+MONITOR=/usr/local/bin/fg-monitor
+[ -x "$MONITOR" ] || MONITOR="$SRC_DIR/run-monitor.py"
+GUI=/usr/local/bin/fg-gui
+[ -x "$GUI" ] || GUI="$SRC_DIR/run.py"
+
+have_display() { [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; }
+
+usage() {
+    cat <<'EOF'
+freeze-guard - Freeze Guard  (Kurzform: vfg)
+
+  freeze-guard            fragt, ob Konsole oder Fenster (nur im Terminal)
+  freeze-guard status     Aktueller Zustand: Speicher, zram, PSI, Dienste
+  freeze-guard monitor    Live-Dashboard im Terminal (Frühwarnung, [q] beendet)
+  freeze-guard ui         Dieselben Daten als Fenster (Verlauf, Protokoll, Simulation)
+  freeze-guard history    Forensik: was lief vor dem letzten Ausfall?
+  freeze-guard log        Was earlyoom / Guard / Kernel bisher gekillt haben
+  freeze-guard dryrun     Zeigt, welchen Prozess der Guard JETZT killen würde
+  freeze-guard doctor     Was auf dieser Maschine funktioniert (und was nicht)
+  freeze-guard uninstall  Alles rückgängig machen (sudo)
+
+Konsole und Oberfläche messen identisch - die Oberfläche benutzt den Sampler
+des Monitors. Argumente hinter dem Befehl werden durchgereicht, z. B.
+  freeze-guard ui --page verlauf --interval 1
+  freeze-guard history --hours 168
+EOF
+}
+
+cmd_ui() {
+    [ -x "$GUI" ] || { echo "Oberfläche nicht gefunden ($GUI)"; exit 1; }
+    if ! have_display; then
+        echo "Keine grafische Sitzung - im Terminal geht es mit:  freeze-guard monitor"
+        exit 1
+    fi
+    exec "$GUI" "$@"
+}
+
+# Bare `freeze-guard` in a terminal: ask instead of guessing. Piped or scripted (no tty)
+# it stays what it always was - a status dump.
+cmd_choose() {
+    printf '\033[1mFreeze Guard\033[0m\n\n'
+    printf '  1) Kurzstatus im Terminal\n'
+    printf '  2) Live-Dashboard im Terminal\n'
+    if have_display; then
+        printf '  3) Grafische Oberfläche (eigenes Fenster)\n'
+    else
+        printf '  3) Grafische Oberfläche \033[2m(keine grafische Sitzung)\033[0m\n'
+    fi
+    printf '  4) Verlauf / Freeze-Forensik\n'
+    printf '  5) Protokoll der Eingriffe\n'
+    printf '  6) Simulation: wen träfe es jetzt?\n'
+    printf '  q) Abbrechen\n\n'
+    printf 'Auswahl [1]: '
+    local answer
+    read -r answer || answer=q
+    case "${answer:-1}" in
+        1|"") cmd_status ;;
+        2)    exec "$MONITOR" ;;
+        3)    cmd_ui ;;
+        4)    exec "$MONITOR" --history ;;
+        5)    cmd_log ;;
+        6)    cmd_dryrun ;;
+        q|Q)  exit 0 ;;
+        *)    echo "Unbekannte Auswahl: $answer"; exit 1 ;;
+    esac
+}
+
+c_ok()   { printf '\033[1;32m%s\033[0m' "$1"; }
+c_warn() { printf '\033[1;33m%s\033[0m' "$1"; }
+c_bad()  { printf '\033[1;31m%s\033[0m' "$1"; }
+c_hdr()  { printf '\n\033[1;34m── %s ─────────────────────────\033[0m\n' "$1"; }
+
+cmd_status() {
+    c_hdr "Speicher"
+    free -h
+    c_hdr "Swap (zram sollte Priorität 100 haben)"
+    swapon --show 2>/dev/null || echo "  kein Swap aktiv"
+    zramctl 2>/dev/null || true
+
+    c_hdr "Speicherdruck (PSI)"
+    local full60 full10 avail
+    full60=$(awk '/^full/{for(i=2;i<=NF;i++) if($i ~ /^avg60=/){sub(/^avg60=/,"",$i); print $i; exit}}' /proc/pressure/memory)
+    full10=$(awk '/^full/{for(i=2;i<=NF;i++) if($i ~ /^avg10=/){sub(/^avg10=/,"",$i); print $i; exit}}' /proc/pressure/memory)
+    avail=$(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%.1f", a*100/t}' /proc/meminfo)
+    echo "  full avg10   : ${full10}%"
+    echo "  full avg60   : ${full60}%   (Guard killt ab 20%)"
+    echo "  MemAvailable : ${avail}%   (Guard killt unter 15%)"
+    printf '  Zustand      : '
+    if awk -v p="$full60" -v a="$avail" 'BEGIN{exit !(p>=20 && a<15)}'; then
+        c_bad "STALL-Bedingung erfüllt"; echo
+    elif awk -v a="$avail" 'BEGIN{exit !(a<25)}'; then
+        c_warn "Speicher wird knapp"; echo
+    else
+        c_ok "normal"; echo
+    fi
+
+    c_hdr "Dienste"
+    local svc label state
+    for svc in earlyoom:earlyoom freeze-guard:Guard freeze-guard-recorder:Aufzeichnung; do
+        label=${svc#*:}; svc=${svc%%:*}
+        state=$(systemctl is-active "$svc.service" 2>/dev/null || echo unknown)
+        printf '  %-14s ' "$label"
+        case "$state" in
+            active) c_ok "aktiv";;
+            inactive|failed) c_bad "$state";;
+            *) c_warn "nicht installiert";;
+        esac
+        echo
+    done
+
+    c_hdr "earlyoom-Argumente (Regex muss OHNE Anführungszeichen ankommen)"
+    local epid; epid=$(pgrep -x earlyoom 2>/dev/null | head -1)
+    if [ -n "$epid" ]; then
+        tr '\0' '\n' < "/proc/$epid/cmdline" 2>/dev/null | sed 's/^/  /'
+    else
+        echo "  earlyoom läuft nicht"
+    fi
+
+    c_hdr "OOM-Scores der IDE (sollten adj=0 sein)"
+    local n=0 p adj comm
+    for p in $(pgrep -x 'code|codium|claude' 2>/dev/null); do
+        [ -r "/proc/$p/oom_score_adj" ] || continue
+        adj=$(cat "/proc/$p/oom_score_adj" 2>/dev/null)
+        comm=$(cat "/proc/$p/comm" 2>/dev/null)
+        if [ "${adj:-0}" -ge 200 ] 2>/dev/null; then
+            printf '  pid %-7s %-10s adj=' "$p" "$comm"; c_warn "$adj"; echo " <- ungefixt"
+            n=$((n+1))
+        fi
+    done
+    [ "$n" -eq 0 ] && { printf '  '; c_ok "alle normalisiert"; echo; }
+    echo
+}
+
+cmd_log() {
+    c_hdr "freeze-guard"
+    journalctl -t freeze-guard --no-pager -n 30 2>/dev/null | tail -30 || echo "  (nichts)"
+    c_hdr "earlyoom (nur Eingriffe)"
+    journalctl -u earlyoom --no-pager --since "30 days ago" 2>/dev/null \
+        | grep -iE "sending sig|killed|victim" | tail -20 || echo "  (nichts)"
+    c_hdr "Kernel-OOM-Kills"
+    journalctl -k --no-pager --since "30 days ago" 2>/dev/null \
+        | grep -iE "out of memory: killed" | tail -10 || echo "  (nichts)"
+    c_hdr "Kernel-Block-Stalls (Freeze-Vorboten)"
+    journalctl -k --no-pager --since "7 days ago" 2>/dev/null \
+        | grep -c "blk_mq_run_work_fn hogged" | xargs -I{} echo "  {} Meldungen in 7 Tagen"
+    journalctl -k --no-pager --since "7 days ago" 2>/dev/null \
+        | grep "blk_mq_run_work_fn hogged" | tail -5 | sed 's/^/  /'
+    echo
+}
+
+cmd_dryrun() {
+    echo "Welchen Prozess würde der Guard bei einem Stall JETZT beenden?"
+    echo "(reine Simulation - es wird nichts angefasst)"
+    local WHITELIST='^(systemd|systemd-.*|init|Xorg|Xwayland|cinnamon|cinnamon-.*|nemo|muffin|sshd|NetworkManager|wpa_supplicant|dbus-daemon|dbus-broker.*|pipewire|pipewire-.*|wireplumber|pulseaudio|lightdm|gdm.*|rtkit-daemon|polkitd|udisksd|earlyoom|freeze-guard|fg-daemon[.]sh|fg-monitor|fg-gui|logger|awk|sleep|kill)$'
+    local PREFER='^(node|esbuild|tsserver|webpack|rollup|vite|next-server|jest|eslint|tsc|php|php8[.][0-9]|composer|Web Content|Isolated Web Co|chrome|chromium)$'
+    local PROTECTED='^(code|claude|codium)$'
+    echo
+    ps -eo pid=,rss=,comm= --sort=-rss 2>/dev/null | awk \
+        -v wl="$WHITELIST" -v pf="$PREFER" -v pr="$PROTECTED" -v minrss=204800 '
+        {
+            pid = $1; rss = $2;
+            comm = "";
+            for (i = 3; i <= NF; i++) comm = comm (i > 3 ? " " : "") $i;
+            if (pid <= 2 || rss + 0 <= 0) next;
+            if (comm ~ wl)      { tier = "geschuetzt (nie)"; w = 0 }
+            else if (comm ~ pf) { tier = "bevorzugt x3.0";   w = 3.0 }
+            else if (comm ~ pr) { tier = "IDE x0.15";        w = 0.15 }
+            else                { tier = "normal x1.0";      w = 1.0 }
+            score = rss * w;
+            if (n < 12) { printf "  pid %-8s %7.0f MB  score %-10.0f %-18s %s\n", pid, rss/1024, score, comm, tier; n++ }
+            if (w > 0 && score > best && rss + 0 >= minrss + 0) { best = score; bpid = pid; bcomm = comm; brss = rss }
+        }
+        END {
+            printf "\n";
+            if (bpid != "")
+                printf "  => Ziel: pid %s (%s, %.0f MB)\n", bpid, bcomm, brss/1024;
+            else
+                printf "  => Kein Ziel über 200 MB - der Guard würde nichts tun.\n";
+        }'
+    echo
+    echo "Regel: höchster Score (RSS x Gewicht) gewinnt, Mindestgröße 200 MB."
+    echo "Ein Prozess mit CPU-Dauerlast bekommt zusätzlich Faktor 2."
+}
+
+# The capability matrix lives in fg_platform.py so that tests can assert it
+# without switching OS; `doctor` is the same report for the running machine.
+cmd_doctor() {
+    local module="$SRC_DIR/fg_platform.py"
+    [ -r "$module" ] || { echo "fg_platform.py nicht gefunden ($module)"; exit 1; }
+    exec python3 "$module"
+}
+
+cmd_uninstall() {
+    [ "$(id -u)" -eq 0 ] || { echo "Bitte: sudo freeze-guard uninstall"; exit 1; }
+    systemctl disable --now freeze-guard.service freeze-guard-recorder.service earlyoom.service 2>/dev/null
+    rm -f /etc/systemd/system/freeze-guard.service /etc/systemd/system/freeze-guard-recorder.service
+    rm -rf /etc/systemd/system/earlyoom.service.d
+    rm -f /usr/local/bin/fg-daemon.sh /usr/local/bin/fg-monitor
+    rm -f /usr/local/bin/fg-gui /usr/local/bin/freeze-guard /usr/local/bin/vfg
+    rm -f /usr/share/applications/freeze-guard.desktop
+    rm -f /etc/sysctl.d/99-freeze-guard.conf /etc/systemd/zram-generator.conf
+    systemctl daemon-reload
+    command -v update-desktop-database >/dev/null && \
+        update-desktop-database /usr/share/applications 2>/dev/null || true
+    echo "Entfernt. zram verschwindet nach Neustart."
+    echo "Aufzeichnung bleibt erhalten: /var/log/freeze-guard-history.csv"
+    echo "Pakete entfernen mit: sudo apt remove earlyoom systemd-zram-generator"
+}
+
+case "${1:-status}" in
+    status)    cmd_status ;;
+    monitor)   exec "$MONITOR" ;;
+    history)   shift; exec "$MONITOR" --history "$@" ;;
+    log)       cmd_log ;;
+    dryrun)    cmd_dryrun ;;
+    doctor)    cmd_doctor ;;
+    uninstall) cmd_uninstall ;;
+    -h|--help|help) usage ;;
+    *) usage; exit 1 ;;
+esac

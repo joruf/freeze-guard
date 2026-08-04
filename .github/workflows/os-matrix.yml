@@ -1,0 +1,32 @@
+name: OS Matrix
+
+# The capability matrix is plain logic, so it can be checked on operating systems
+# the tool itself does not support - that is the point: it has to say
+# "unsupported" there rather than pretend.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 4 1 * *"
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    name: platform matrix on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip pytest
+      - name: Report this machine
+        run: python fg_platform.py
+        continue-on-error: true
+      - name: Assert the documented matrix
+        run: python -m pytest tests/test_platform_matrix.py -q
