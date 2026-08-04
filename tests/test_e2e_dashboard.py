@@ -292,8 +292,35 @@ class TestDashboardIncident(unittest.TestCase):
         pump()
         self.assertEqual(sent, [])
 
+    def test_only_critical_notifies_by_default(self) -> None:
+        """Quiet by default: warning is carried by the tray icon, not by a bubble."""
+        sent, _closed = self.notification_spy()
+        for _ in range(4):
+            self.poller.feed(self.samples["orange"])
+        pump()
+        self.assertEqual(sent, [])
+        self.poller.feed(self.samples["red"])
+        pump()
+        self.assertEqual(len(sent), 1)
+
+    def test_bubble_closes_itself_after_three_seconds(self) -> None:
+        """The desktop ignores the expire hint, so the lifetime is enforced by us."""
+        self.assertEqual(G.NOTIFY_VISIBLE_SECONDS, 3)
+        self.assertEqual(G.NOTIFY_TIMEOUT_MS, 3000)
+        _sent, closed = self.notification_spy()
+        self.window._notify_id = 4711
+        self.window._auto_close(4711)
+        self.assertEqual(len(closed), 1)
+
+    def test_auto_close_leaves_a_newer_bubble_alone(self) -> None:
+        _sent, closed = self.notification_spy()
+        self.window._notify_id = 99
+        self.window._auto_close(42)      # an older bubble's timer
+        self.assertEqual(closed, [])
+
     def test_warning_notifies_once_not_on_every_sample(self) -> None:
         sent, _closed = self.notification_spy()
+        self.window.settings.data["notify_level"] = G.ORANGE
         for _ in range(5):
             self.poller.feed(self.samples["orange"])
         pump()
@@ -303,6 +330,7 @@ class TestDashboardIncident(unittest.TestCase):
         """This is what actually happened: the level bounced between raised and
         warning, and every bounce produced a notification that never expired."""
         sent, _closed = self.notification_spy()
+        self.window.settings.data["notify_level"] = G.ORANGE
         for _ in range(6):
             self.poller.feed(self.samples["orange"])
             self.poller.feed(self.samples["yellow"])
@@ -311,6 +339,7 @@ class TestDashboardIncident(unittest.TestCase):
 
     def test_escalation_within_the_cooldown_is_held_back(self) -> None:
         sent, _closed = self.notification_spy()
+        self.window.settings.data["notify_level"] = G.ORANGE
         self.poller.feed(self.samples["orange"])
         self.poller.feed(self.samples["red"])
         pump()
@@ -318,6 +347,7 @@ class TestDashboardIncident(unittest.TestCase):
 
     def test_escalation_after_the_cooldown_is_announced(self) -> None:
         sent, _closed = self.notification_spy()
+        self.window.settings.data["notify_level"] = G.ORANGE
         self.poller.feed(self.samples["orange"])
         pump()
         self.window._last_notify -= self.window.settings["notify_cooldown"] + 1

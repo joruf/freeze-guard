@@ -113,6 +113,11 @@ def load_monitor():
 
 M = load_monitor()
 
+# The single-instance guard lives next to run.py; import it by path so the file
+# works from the repository and from /usr/local/bin alike.
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import fg_instance  # noqa: E402  (needs the path above)
+
 GREEN, YELLOW, ORANGE, RED = M.GREEN, M.YELLOW, M.ORANGE, M.RED
 LEVEL_KEY = {GREEN: "level.ok", YELLOW: "level.raised",
              ORANGE: "level.warning", RED: "level.critical"}
@@ -322,12 +327,17 @@ STR = {
         "set.autoopen_hint": ("Once per incident: the window only reappears after the "
                               "level has dropped below the threshold again."),
         "set.notify": "Desktop notifications",
+        "set.notify_level": "Notify from level",
+        "set.notify_level_hint": ("Quiet by default: only the level at which the "
+                                  "guard is about to kill. The tray icon carries "
+                                  "every level anyway."),
         "set.notify_cooldown": "At most one notification every",
         "set.notify_cooldown_hint": ("Only on escalation, never with urgency "
                                      "'critical' - those never expire - and always "
                                      "replacing the previous bubble instead of "
-                                     "stacking. It closes itself once the pressure "
-                                     "is gone."),
+                                     "stacking. Each one closes itself after 3 "
+                                     "seconds, because this desktop ignores the "
+                                     "expire hint."),
         "set.minutes": "{n} min",
         "set.panel_label": "Show free memory in the panel",
         "set.autostart": "Start on login",
@@ -345,6 +355,17 @@ STR = {
         "chart.seconds_ago": "-{n} s",
         "tray.level": "Level: {level}",
         "err.no_terminal": "no terminal found",
+        "instance.title": "Freeze Guard is already running",
+        "instance.focused": ("The existing window has been brought to the front. "
+                             "Only one instance may run: two of them would sample "
+                             "/proc twice, fight over the same tray icon and report "
+                             "the same incident twice."),
+        "instance.blocked": ("Only one instance may run at a time. The running one "
+                             "(pid {pid}) did not answer - quit it through its tray "
+                             "icon, or end it with: kill {pid}"),
+        "instance.blocked_nopid": ("Only one instance may run at a time, and the "
+                                   "running one did not answer. Quit it through its "
+                                   "tray icon."),
         "reason.stall": "stall condition met — the guard is about to step in",
         "reason.all_blocked": "all tasks are blocked on memory",
         "reason.kernel_stalls": "kernel reports block-layer stalls (freeze precursor)",
@@ -536,12 +557,16 @@ STR = {
         "set.autoopen_hint": ("Einmal pro Vorfall: das Fenster kommt erst wieder, wenn "
                               "die Stufe zwischendurch unter die Schwelle fiel."),
         "set.notify": "Desktop-Benachrichtigungen",
+        "set.notify_level": "Melden ab Stufe",
+        "set.notify_level_hint": ("Standard ist leise: nur die Stufe, auf der der "
+                                  "Guard gleich eingreift. Das Symbol in der "
+                                  "Systemleiste trägt ohnehin jede Stufe."),
         "set.notify_cooldown": "Höchstens eine Meldung alle",
         "set.notify_cooldown_hint": ("Nur bei Verschlechterung, nie mit Dringlichkeit "
                                      "'critical' - die laufen nie ab - und immer die "
                                      "vorherige Meldung ersetzend statt stapelnd. "
-                                     "Sie schließt sich selbst, wenn der Druck weg "
-                                     "ist."),
+                                     "Jede schließt sich nach 3 Sekunden selbst, "
+                                     "weil dieser Desktop die Ablaufzeit ignoriert."),
         "set.minutes": "{n} min",
         "set.panel_label": "Freien Speicher in der Systemleiste anzeigen",
         "set.autostart": "Beim Anmelden starten",
@@ -559,6 +584,17 @@ STR = {
         "chart.seconds_ago": "-{n} s",
         "tray.level": "Stufe: {level}",
         "err.no_terminal": "kein Terminal gefunden",
+        "instance.title": "Freeze Guard läuft bereits",
+        "instance.focused": ("Das vorhandene Fenster wurde nach vorn geholt. Es darf "
+                             "nur eine Instanz laufen: zwei würden /proc doppelt "
+                             "abfragen, sich um dasselbe Symbol in der Systemleiste "
+                             "streiten und denselben Vorfall zweimal melden."),
+        "instance.blocked": ("Es darf nur eine Instanz laufen. Die laufende "
+                             "(PID {pid}) antwortet nicht - über ihr Symbol in der "
+                             "Systemleiste beenden, oder mit: kill {pid}"),
+        "instance.blocked_nopid": ("Es darf nur eine Instanz laufen, und die laufende "
+                                   "antwortet nicht. Über ihr Symbol in der "
+                                   "Systemleiste beenden."),
         "reason.stall": "Stall-Bedingung erfüllt — der Guard greift gleich ein",
         "reason.all_blocked": "Alle Tasks blockieren auf Speicher",
         "reason.kernel_stalls": "Kernel meldet Block-Layer-Stalls (Vorbote des Freeze)",
@@ -604,7 +640,8 @@ class Settings:
         "auto_open": True,
         "auto_open_level": ORANGE,
         "notify": True,
-        "notify_cooldown": 300.0,   # seconds between two notifications
+        "notify_cooldown": 900.0,   # seconds between two notifications
+        "notify_level": RED,        # quiet by default: only the kill condition
         "tray_hint_shown": False,   # "closing only hides me" - shown once
         "panel_label": True,
         "history_file": HISTORY_FILE,
@@ -626,10 +663,14 @@ class Settings:
             self.data["auto_open_level"] = int(self.data["auto_open_level"])
             self.data["notify_cooldown"] = min(
                 3600.0, max(60.0, float(self.data["notify_cooldown"])))
+            self.data["notify_level"] = int(self.data["notify_level"])
+            if self.data["notify_level"] not in (YELLOW, ORANGE, RED):
+                self.data["notify_level"] = RED
         except (TypeError, ValueError):
             self.data["interval"] = self.DEFAULTS["interval"]
             self.data["auto_open_level"] = self.DEFAULTS["auto_open_level"]
             self.data["notify_cooldown"] = self.DEFAULTS["notify_cooldown"]
+            self.data["notify_level"] = self.DEFAULTS["notify_level"]
 
     def __getitem__(self, key):
         return self.data[key]
@@ -669,7 +710,7 @@ class Settings:
                         "Type=Application\n"
                         "Name=Freeze Guard\n"
                         "Comment=Memory pressure and freeze early warning\n"
-                        f"Exec={exe}\n"
+                        f"Exec={exe} --quiet\n"
                         "Icon=utilities-system-monitor\n"
                         "Terminal=false\n"
                         "X-GNOME-Autostart-enabled=true\n")
@@ -1150,9 +1191,13 @@ class Meter(Gtk.DrawingArea):
 # ---------------------------------------------------------------------------
 # Notifications are never sent with urgency "critical": per the desktop
 # notification spec a critical notification does not expire, so a flapping alert
-# level builds a wall of bubbles that cannot be dismissed. Urgency normal plus an
-# explicit timeout keeps them dismissible.
-NOTIFY_TIMEOUT_MS = 20000
+# level builds a wall of bubbles that cannot be dismissed.
+#
+# The expire-timeout below is only a hint, and Cinnamon ignores it - measured:
+# a bubble sent with 3000 ms produced no NotificationClosed signal at all. So the
+# lifetime is enforced from here, by closing the bubble ourselves.
+NOTIFY_VISIBLE_SECONDS = 3
+NOTIFY_TIMEOUT_MS = NOTIFY_VISIBLE_SECONDS * 1000
 NOTIFY_ICON = "utilities-system-monitor"
 
 KILL_ICON = "process-stop-symbolic"
@@ -2143,6 +2188,16 @@ class SettingsPage(Gtk.Box):
         self.notify_switch.connect("state-set", self._on_bool, "notify")
         row = self._add(grid, row, t("set.notify"), self.notify_switch)
 
+        self.notify_level_combo = Gtk.ComboBoxText()
+        for _lv, key in self.LEVELS:
+            self.notify_level_combo.append_text(t(key))
+        self.notify_level_combo.set_active(
+            levels.index(settings["notify_level"])
+            if settings["notify_level"] in levels else 2)
+        self.notify_level_combo.connect("changed", self._on_notify_level)
+        row = self._add(grid, row, t("set.notify_level"), self.notify_level_combo,
+                        t("set.notify_level_hint"))
+
         self.cooldown_combo = Gtk.ComboBoxText()
         for seconds in self.COOLDOWNS:
             self.cooldown_combo.append_text(t("set.minutes", n=num(seconds / 60, 0)))
@@ -2197,6 +2252,12 @@ class SettingsPage(Gtk.Box):
         value = self.INTERVALS[max(0, combo.get_active())]
         self.settings.set("interval", value)
         self.on_change("interval", value)
+        self._saved()
+
+    def _on_notify_level(self, combo):
+        if self._loading:
+            return
+        self.settings.set("notify_level", self.LEVELS[max(0, combo.get_active())][0])
         self._saved()
 
     def _on_cooldown(self, combo):
@@ -2363,9 +2424,11 @@ class Tray:
 class Window(Gtk.Window):
     PAGES = ("live", "history", "log", "sim", "settings")
 
-    def __init__(self, settings, page="live"):
+    def __init__(self, settings, page="live", guard=None):
         super().__init__(title=t("app.title"))
         self.settings = settings
+        self.guard = guard          # released on quit, see quit()
+        self.control = None         # answers a second start, see main()
         self.set_default_size(1200, 820)
         self.set_icon_name("utilities-system-monitor")
         apply_theme(self)
@@ -2569,6 +2632,10 @@ class Window(Gtk.Window):
     def quit(self):
         self._quitting = True
         self.poller.stop()
+        if self.control is not None:
+            self.control.stop()
+        if self.guard is not None:
+            self.guard.release()
         app = self.get_application()
         if app is not None:
             app.quit()
@@ -2649,8 +2716,9 @@ class Window(Gtk.Window):
         one bubble that is replaced in place, sent only on escalation, rate
         limited, and closed again once the pressure is gone.
         """
-        if level < ORANGE:
-            if self._notified_level >= ORANGE:
+        threshold = self.settings["notify_level"]
+        if level < threshold:
+            if self._notified_level >= threshold:
                 self._close_notification()
             self._notified_level = GREEN
             return
@@ -2683,6 +2751,19 @@ class Window(Gtk.Window):
 
     def _remember_notification(self, notify_id):
         self._notify_id = notify_id
+        if notify_id:
+            GLib.timeout_add_seconds(NOTIFY_VISIBLE_SECONDS, self._auto_close,
+                                     notify_id)
+        return False
+
+    def _auto_close(self, notify_id):
+        """Take the bubble away after its time is up.
+
+        Necessary because the expire hint is advisory and this desktop ignores it.
+        Only closes the bubble it was scheduled for, so a newer one survives.
+        """
+        if self._notify_id == notify_id:
+            self._close_notification()
         return False
 
     def _close_notification(self):
@@ -2719,32 +2800,64 @@ class Window(Gtk.Window):
 
 
 class App(Gtk.Application):
-    """Single instance. A second start does not open a second window - and more
-    importantly not a second tray icon, which would fight the first one over the
-    same D-Bus name. It just brings the existing window to the front, which is
-    also what clicking the menu entry again should do."""
+    """Hosts the window.
 
-    def __init__(self, settings, page, show_window):
+    Deliberately NON_UNIQUE: uniqueness is enforced by the lock file in
+    fg_instance, the same way the other tools in ~/Applications do it. Two
+    mechanisms guarding the same thing means two answers when they disagree.
+    """
+
+    def __init__(self, settings, page, show_window, guard):
         super().__init__(application_id="de.local.FreezeGuard",
-                         flags=Gio.ApplicationFlags.FLAGS_NONE)
+                         flags=Gio.ApplicationFlags.NON_UNIQUE)
         self.settings = settings
         self.page = page
         self.show_window = show_window
+        self.guard = guard
         self.win = None
 
     def do_activate(self):
         if self.win is None:
-            self.win = Window(self.settings, page=self.page)
+            self.win = Window(self.settings, page=self.page, guard=self.guard)
             self.add_window(self.win)
             # Keep running while the window is hidden in the tray: without the
             # hold, GApplication would consider itself done.
             self.hold()
+            # A second start asks through the control socket; answer it on the
+            # main loop, never from the socket thread.
+            self.win.control = fg_instance.InstanceControlServer(
+                lambda: GLib.idle_add(self.win.present_window))
+            self.win.control.start()
             # Never start invisible without a tray: that would be a program
             # with no way back.
             if self.show_window or not self.win.tray.available:
                 self.win.show_all()
         else:
             self.win.present_window()
+
+
+def report_already_running(focused_existing, owner_pid):
+    """Tell the user why nothing opened.
+
+    A second start that exits without a word looks like a broken launcher, so it
+    says what happened - and if the running instance could not be reached, how to
+    get rid of it.
+    """
+    if focused_existing:
+        text, kind = t("instance.focused"), Gtk.MessageType.INFO
+    elif owner_pid:
+        text, kind = t("instance.blocked", pid=owner_pid), Gtk.MessageType.WARNING
+    else:
+        text, kind = t("instance.blocked_nopid"), Gtk.MessageType.WARNING
+    print(f"{t('instance.title')}: {text}", file=sys.stderr)
+    if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
+        return
+    dialog = Gtk.MessageDialog(modal=True, message_type=kind,
+                               buttons=Gtk.ButtonsType.OK,
+                               text=t("instance.title"), secondary_text=text)
+    dialog.set_icon_name(NOTIFY_ICON)
+    dialog.run()
+    dialog.destroy()
 
 
 def main():
@@ -2764,6 +2877,9 @@ def main():
                     help="page to start on")
     ap.add_argument("--window", action="store_true",
                     help="start with the window visible, ignoring the tray setting")
+    ap.add_argument("--quiet", action="store_true",
+                    help="when another instance already runs, exit silently "
+                         "(used by the autostart entry)")
     args = ap.parse_args()
 
     if args.interval:
@@ -2780,11 +2896,19 @@ def main():
         sys.exit("No graphical session (DISPLAY is empty).\n"
                  "In a terminal:  freeze-guard monitor")
 
+    may_continue, guard = fg_instance.enforce_single_instance(
+        quiet=args.quiet, on_blocked=report_already_running)
+    if not may_continue:
+        sys.exit(1)
+
     show = args.window or not settings["start_in_tray"]
-    app = App(settings, args.page, show)
-    # argv is not forwarded: our options are parsed above, GApplication would
-    # only reject them.
-    sys.exit(app.run([]))
+    app = App(settings, args.page, show, guard)
+    try:
+        # argv is not forwarded: our options are parsed above, GApplication would
+        # only reject them.
+        sys.exit(app.run([]))
+    finally:
+        guard.release()
 
 
 if __name__ == "__main__":

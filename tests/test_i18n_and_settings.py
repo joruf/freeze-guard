@@ -134,13 +134,23 @@ class TestSettings(unittest.TestCase):
         self.assertEqual(settings["auto_open_level"], G.ORANGE)
         self.assertTrue(settings["notify"])
 
-    def test_notification_cooldown_default_is_five_minutes(self) -> None:
-        """One notification per minute was the reason for the bubble wall."""
-        self.assertEqual(G.Settings()["notify_cooldown"], 300.0)
+    def test_notification_defaults_are_quiet(self) -> None:
+        """One notification per minute at every level was the bubble wall."""
+        settings = G.Settings()
+        self.assertEqual(settings["notify_cooldown"], 900.0)
+        self.assertEqual(settings["notify_level"], G.RED)
+
+    def test_notify_level_is_clamped_to_a_real_level(self) -> None:
+        for value, expected in ((G.YELLOW, G.YELLOW), (G.ORANGE, G.ORANGE),
+                                (G.RED, G.RED), (G.GREEN, G.RED), (99, G.RED)):
+            with self.subTest(value=value):
+                with open(G.CONFIG_FILE, "w") as f:
+                    json.dump({"notify_level": value}, f)
+                self.assertEqual(G.Settings()["notify_level"], expected)
 
     def test_cooldown_is_clamped_into_a_sane_range(self) -> None:
         for value, expected in ((1, 60.0), (300, 300.0), (99999, 3600.0),
-                                ("soon", 300.0)):
+                                ("soon", 900.0)):
             with self.subTest(value=value):
                 with open(G.CONFIG_FILE, "w") as f:
                     json.dump({"notify_cooldown": value}, f)

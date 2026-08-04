@@ -4,6 +4,12 @@ Schutz und Überwachung gegen Komplett-Freezes unter Speicherdruck. Entstanden
 auf dieser Linux-Mint-VM (VMware, 21 GB RAM, 16 vCPU), die am 03.08.2026
 viermal an einem Tag einfror.
 
+![Live-Seite der Oberfläche](docs/screenshots/live.png)
+
+*Die Live-Seite: Speicher und Swap als Balken, Druck/Auslagern/CPU als Verlauf,
+die größten Verbraucher mit Beenden-Knopf, unten rechts die vier Schutzschichten
+zum Ein- und Ausschalten.*
+
 ## Nur für VMs? Nein — VMs treffen es nur früher
 
 Alle vier Schichten sind generisches Linux: zram, earlyoom, PSI-Auswertung,
@@ -156,6 +162,41 @@ Fünf Seiten, alle auf denselben Messungen:
 | **Simulation** | wen der Guard jetzt beenden würde, mit Punktzahl und Kategorie |
 | **Einstellungen** | Sprache, Intervall, Systemleiste, automatisches Öffnen, Benachrichtigungen, Autostart |
 
+![Verlauf mit Ausfall](docs/screenshots/history.png)
+
+*Verlauf: die rote Fläche ist der Ausfall, die Zeitachse zeigt davor das
+Auslaufen des Speichers und den Anstieg von Druck und Auslagerung. Aufgeklappt
+darunter die letzten Messungen vor dem Stillstand — inklusive der größten
+Speicher- und CPU-Verbraucher.
+**Die Aufzeichnung in diesem Bild ist synthetisch** (`scripts/make_screenshots.py`
+erzeugt sie): die echten Freezes dieser Maschine liegen vor der Einführung des
+Recorders, ein Bild mit echtem Ausfall existiert also noch nicht.*
+
+![Simulation der Opferauswahl](docs/screenshots/simulation.png)
+
+*Simulation: dieselbe Rechnung, die der Daemon anstellt, auf den laufenden
+Prozessen — Punktzahl, Kategorie und das fett markierte Ziel. Hier gewinnt ein
+886-MB-Browser-Renderer (×3) gegen die 2,5-GB-IDE (×0,15). Der Knopf in der
+letzten Spalte beendet dagegen wirklich.*
+
+![Protokoll](docs/screenshots/log.png)
+
+*Protokoll: dieselben Journal-Abfragen wie `freeze-guard log`. Hier gut zu sehen,
+warum das Werkzeug existiert — die Reihe `blk_mq_run_work_fn hogged CPU`
+verdoppelt sich von 4 über 67 auf 131 Meldungen, und earlyoom hat an diesem Tag
+schon eingegriffen.*
+
+![Einstellungen](docs/screenshots/settings.png)
+
+*Einstellungen mit den Auslieferungswerten: Englisch, 5 s Messintervall, Start in
+der Systemleiste, Selbstöffnen ab WARNUNG, höchstens eine Meldung alle 5 Minuten.*
+
+![Live-Seite im dunklen Farbschema](docs/screenshots/live-dark.png)
+
+*Dasselbe Fenster im dunklen Farbschema. Hell und dunkel sind zwei getrennt
+gewählte Palettenstufen, keine automatische Umkehr: die Serienfarben sind gegen
+die jeweilige Kartenfläche auf Kontrast und Farbfehlsichtigkeit geprüft.*
+
 Eigenschaften, die im Ernstfall zählen:
 
 - **Sprache Englisch/Deutsch**, Standard Englisch, umschaltbar im Menü und in den
@@ -182,6 +223,39 @@ Eigenschaften, die im Ernstfall zählen:
   Fehlt eine Unit, ist der Schalter aus und nennt den Installationsbefehl.
 - **Intervall** Standard 5 s, einstellbar 1/2/5/10/30 s. Jeder Takt liest ganz
   `/proc`; 5 s sind schonend, 1 s zeigt Spitzen.
+- **Nur eine Instanz.** Wie bei den anderen Werkzeugen in `~/Applications`:
+  exklusives `flock` auf `$XDG_RUNTIME_DIR/freeze-guard/instance.lock` mit der PID
+  darin, daneben `control.sock`. Ein zweiter Start holt über diesen Socket das
+  vorhandene Fenster nach vorn, sagt es und beendet sich mit Exit 1; der
+  Autostart-Eintrag benutzt dafür `--quiet` und schweigt. Zwei Instanzen wären
+  hier nicht bloß unsauber — beide würden `/proc` doppelt abfragen, sich um
+  dasselbe Symbol in der Systemleiste streiten und denselben Vorfall zweimal
+  melden. Stürzt eine Instanz ab, gibt der Kernel das Lock frei, und ein
+  liegengebliebener Socket wird beim nächsten Start ersetzt.
+
+### Benachrichtigungen — bewusst leise
+
+Standard: **erst ab KRITISCH**, höchstens **eine alle 15 Minuten**, und jede
+schließt sich nach **3 Sekunden** von selbst. Beides einstellbar (ab ERHÖHT /
+WARNUNG / KRITISCH; 1/5/15/60 min).
+
+Drei Eigenschaften, die man nur nach dem ersten Fehlversuch schätzt:
+
+- **Nie mit Dringlichkeit `critical`.** Die läuft laut Spezifikation *nie ab* —
+  eine flatternde Stufe baut damit eine Wand von Blasen, die man einzeln
+  wegklicken muss.
+- **Eine Blase, ersetzt statt gestapelt.** `notify-send -p` liefert die ID,
+  Folgemeldungen ersetzen sie per `-r`.
+- **Die 3 Sekunden werden selbst durchgesetzt.** Die Ablaufzeit ist nur ein
+  Hinweis, und Cinnamon ignoriert sie: eine mit 3000 ms verschickte Blase löste
+  nachgemessen *kein* `NotificationClosed` aus. Das Programm schließt sie deshalb
+  aktiv per `CloseNotification` — und ebenso, sobald der Druck weg ist.
+
+Gemeldet wird nur bei **Verschlechterung**, nicht bei jedem Sprung: erst wenn die
+Stufe höher steigt als die zuletzt gemeldete. Zurück unter die Schwelle setzt das
+zurück. An der echten Messreihe dieser Maschine (27 min Flattern zwischen ERHÖHT
+und WARNUNG) gerechnet: vorher ~5–6 dauerhaft liegenbleibende Meldungen, jetzt
+eine, die sich selbst schließt.
 
 Einstellungen liegen in `~/.config/freeze-guard/settings.json`, der Autostart in
 `~/.config/autostart/freeze-guard.desktop`. Kommandozeile für Sonderfälle:
@@ -292,8 +366,11 @@ sudo swapon /swapfile
 | `fg-daemon.sh` | der Guard-Daemon (Schicht 2), installiert als `fg-daemon.sh` |
 | `freeze-guard` | die CLI, installiert als `freeze-guard` und `vfg` |
 | `fg_platform.py` | Fähigkeitsmatrix je Maschinenprofil, Grundlage von `doctor` und OS-Test |
+| `fg_instance.py` | Einzelinstanz-Sperre und Steuersocket (Hauskonvention wie die anderen Werkzeuge) |
 | `install.sh` | richtet alle vier Schichten ein, idempotent |
 | `tests/` | Unit-, E2E- und OS-Tests |
+| `scripts/run-tests.sh` | Testläufer (`unit` / `e2e` / `os` / alles) |
+| `scripts/make_screenshots.py` | erzeugt die Bilder in `docs/screenshots/` neu |
 
 Die beiden Python-Einstiegspunkte heißen im Repository `run.py` und
 `run-monitor.py` (wie üblich für ein Projekt, das man auch direkt aus dem
@@ -332,12 +409,27 @@ Ohne `pytest` fällt das Skript auf `unittest discover` zurück, ohne Display au
 | **E2E Dashboard** | ein Fenster durch einen echten Vorfall: grün → knapp → Warnung → kritisch → zurück, Selbstöffnen genau einmal pro Vorfall, Sprachwechsel im Betrieb, Dienst-Schalter, Schutz-Karte in allen drei Zuständen |
 | **E2E Recorder** | Recorder als eigener Prozess, echte CSV, simulierter Freeze durch Loch in der Zeitreihe, beide Leser finden ihn; `SIGKILL` des Recorders darf keine halbe Zeile hinterlassen |
 | **E2E Kill** | echte Kindprozesse: `SIGTERM`, Eskalation zu `SIGKILL`, PID-Reuse-Schutz, und dass für eigene Prozesse **nie** `pkexec` anläuft |
+| **Einzelinstanz** | `flock` an echten Dateien: zweiter Zugriff scheitert, abgestürzter Besitzer gibt frei, PID in der Datei, Steuersocket mit `SHOW`, alte Restdatei wird ersetzt, `quiet` schweigt — dazu zwei echte Prozesse, von denen der zweite mit Exit 1 aussteigt |
+| **Benachrichtigungen** | leise Standardwerte, nur bei Verschlechterung, Sperrfrist, Selbstschließen nach 3 s, und dass `-u critical` nicht mehr im Code steht |
 | **CLI** | Hilfe, Exit-Codes, `status`, `dryrun`, `doctor`, `--history` auf synthetischer Aufzeichnung, Shell-Syntax aller Skripte |
 | **OS-Test** | neun Maschinenprofile (PSI fehlt, kein systemd, cgroup v1, Container, Wayland, headless, Windows, macOS) gegen die dokumentierte Matrix; dazu der Bericht dieser Maschine |
 
 Es werden nur Prozesse signalisiert, die die Tests selbst gestartet haben, und
 kein Test ruft `pkexec` auf — eine Testsuite, die einen Passwortdialog öffnet,
 läuft niemand zweimal.
+
+## Screenshots neu erzeugen
+
+```bash
+scripts/make_screenshots.py              # alle Seiten, helles Schema
+scripts/make_screenshots.py --dark live  # einzelne Seite, dunkles Schema
+```
+
+Jedes Bild entsteht aus einem frisch gestarteten Fenster, damit die
+Dokumentation nicht von der Anwendung wegdriftet. Braucht eine X-Sitzung sowie
+`gnome-screenshot`, `xdotool`, `wmctrl` und Pillow; fehlt etwas, sagt das Skript
+welches Paket. Die Bilder zeigen echte Prozessnamen und Journal-Zeilen dieser
+Maschine — vor dem Veröffentlichen ansehen.
 
 ## Eigenlast der Programme
 
