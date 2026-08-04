@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 from collections import deque
+from pathlib import Path
 
 try:
     import gi
@@ -316,6 +317,14 @@ STR = {
         "log.sec_oom": "kernel OOM kills",
         "log.sec_stalls": "kernel block stalls — freeze precursors",
         "set.language": "Language",
+        "set.appearance": "Appearance",
+        "set.appearance_hint": ("Light and dark are two separately chosen palettes, "
+                                "not an inverted one: the series colours are checked "
+                                "for contrast and colour blindness against their own "
+                                "card surface. Auto follows the desktop theme."),
+        "appearance.auto": "Auto (desktop theme)",
+        "appearance.light": "Light",
+        "appearance.dark": "Dark",
         "set.interval": "Sample interval",
         "set.interval_hint": "Every tick reads all of /proc — 5 s is easy on the machine.",
         "set.tray": "Start in the system tray",
@@ -544,6 +553,15 @@ STR = {
         "log.sec_oom": "Kernel-OOM-Kills",
         "log.sec_stalls": "Kernel-Block-Stalls — Freeze-Vorboten",
         "set.language": "Sprache",
+        "set.appearance": "Erscheinungsbild",
+        "set.appearance_hint": ("Hell und dunkel sind zwei getrennt gewählte "
+                                "Paletten, keine invertierte: die Serienfarben sind "
+                                "gegen ihre eigene Kartenfläche auf Kontrast und "
+                                "Farbfehlsichtigkeit geprüft. Auto folgt dem "
+                                "Desktop-Thema."),
+        "appearance.auto": "Auto (Desktop-Thema)",
+        "appearance.light": "Hell",
+        "appearance.dark": "Dunkel",
         "set.interval": "Messintervall",
         "set.interval_hint": ("Jeder Takt liest ganz /proc — 5 s sind schonend für die "
                               "Maschine."),
@@ -635,6 +653,7 @@ class Settings:
 
     DEFAULTS = {
         "lang": "en",
+        "theme": "auto",            # auto | light | dark
         "interval": 5.0,
         "start_in_tray": True,
         "auto_open": True,
@@ -658,6 +677,8 @@ class Settings:
             pass
         if self.data["lang"] not in STR:
             self.data["lang"] = "en"
+        if self.data["theme"] not in THEME_MODES:
+            self.data["theme"] = "auto"
         try:
             self.data["interval"] = min(60.0, max(1.0, float(self.data["interval"])))
             self.data["auto_open_level"] = int(self.data["auto_open_level"])
@@ -753,6 +774,74 @@ STATUS = {
 
 PAL = dict(LIGHT)  # replaced at startup and whenever the GTK theme changes
 
+THEME_MODES = ("auto", "light", "dark")
+THEME_DIRS = (Path.home() / ".themes", Path("/usr/share/themes"),
+              Path("/usr/local/share/themes"))
+_original_appearance = None   # (theme name, prefer-dark) as the session had it
+
+
+def theme_exists(name):
+    return any((d / name / "gtk-3.0").is_dir() for d in THEME_DIRS)
+
+
+def theme_ships_dark_css(name):
+    """A theme with gtk-dark.css follows gtk-application-prefer-dark-theme, which
+    is the clean way in - no guessing of theme names."""
+    return any((d / name / "gtk-3.0" / "gtk-dark.css").is_file() for d in THEME_DIRS)
+
+
+def sibling_theme(name, want_dark):
+    """The light or dark twin of a theme, if the desktop ships one.
+
+    Mint-Y-Aqua <-> Mint-Y-Dark-Aqua, Mint-Y <-> Mint-Y-Dark. Only used when the
+    theme itself has no dark stylesheet, or when a dark theme is asked to become
+    light - prefer-dark cannot make a dark theme light again.
+    """
+    parts = name.split("-")
+    if want_dark:
+        if "dark" in name.lower():
+            return None
+        candidates = ["-".join(parts[:2] + ["Dark"] + parts[2:]), f"{name}-Dark",
+                      f"{name}-dark"]
+    else:
+        candidates = [name.replace("-Dark-", "-").replace("-Dark", ""),
+                      name.replace("-dark", "")]
+    for candidate in candidates:
+        if candidate and candidate != name and theme_exists(candidate):
+            return candidate
+    return None
+
+
+def apply_appearance(mode):
+    """Push the choice down to GTK so the window chrome, lists and menus follow.
+
+    Without this, only our own cards would change colour and the tree views would
+    stay in the other palette - a half-dark window looks broken, not themed.
+    """
+    global _original_appearance
+    settings = Gtk.Settings.get_default()
+    if settings is None:
+        return
+    if _original_appearance is None:
+        _original_appearance = (settings.get_property("gtk-theme-name"),
+                                bool(settings.get_property(
+                                    "gtk-application-prefer-dark-theme")))
+    original_name, original_dark = _original_appearance
+    if mode == "auto":
+        settings.set_property("gtk-theme-name", original_name)
+        settings.set_property("gtk-application-prefer-dark-theme", original_dark)
+        return
+    want_dark = mode == "dark"
+    current = settings.get_property("gtk-theme-name") or original_name
+    settings.set_property("gtk-application-prefer-dark-theme", want_dark)
+    if want_dark and theme_ships_dark_css(current):
+        return                      # prefer-dark is enough for this theme
+    twin = sibling_theme(current, want_dark)
+    if twin:
+        settings.set_property("gtk-theme-name", twin)
+    elif not want_dark:
+        settings.set_property("gtk-theme-name", original_name)
+
 
 def rgba(hexcolor, alpha=1.0):
     h = hexcolor.lstrip("#")
@@ -799,16 +888,34 @@ CSS_TEMPLATE = """
 .fg-icon-serious  { color: %(serious)s; font-weight: 800; }
 .fg-icon-critical { color: %(critical)s; font-weight: 800; }
 .fg-hint         { color: %(ink2)s; font-size: 90%%; }
+
+/* Lists and the log live inside our cards, so they wear our surface too. The
+   text colour is forced anyway, and a theme that keeps its own light base for
+   views would leave white ink on white - unreadable, and only visible on that
+   one theme. Owning both sides is the only way to be sure. */
+.fg-list, .fg-list treeview.view, .fg-list treeview.view:not(:selected) {
+    background-color: %(surface)s; color: %(ink)s; }
+.fg-list treeview.view:hover { background-color: alpha(%(ink)s, 0.06); }
+.fg-list treeview.view:selected {
+    background-color: alpha(%(series0)s, 0.30); color: %(ink)s; }
+.fg-list treeview.view header button {
+    background-color: %(plane)s; color: %(ink2)s; }
+.fg-log, .fg-log text { background-color: %(surface)s; color: %(ink)s; }
 """
 
 _css_provider = None
 
 
-def apply_theme(widget):
-    """Pick the light or dark step set and (re)load the CSS."""
+def apply_theme(widget, mode="auto"):
+    """Pick the light or dark step set and (re)load the CSS.
+
+    'auto' asks the desktop; the other two modes are the user's decision and must
+    not be second-guessed by detection.
+    """
     global PAL, _css_provider
-    PAL = dict(DARK if detect_dark(widget) else LIGHT)
-    data = CSS_TEMPLATE % dict(PAL, **STATUS)
+    dark = detect_dark(widget) if mode == "auto" else mode == "dark"
+    PAL = dict(DARK if dark else LIGHT)
+    data = CSS_TEMPLATE % dict(PAL, series0=PAL["series"][0], **STATUS)
     if _css_provider is None:
         _css_provider = Gtk.CssProvider()
         Gtk.StyleContext.add_provider_for_screen(
@@ -1222,7 +1329,7 @@ class ProcTable(Gtk.Box):
         self.store = Gtk.ListStore(*([str] * self.ncols + [str, int, int, str]))
         self.view = Gtk.TreeView(model=self.store)
         self.view.set_enable_search(False)
-        self.view.get_style_context().add_class("fg-ink")
+        self.view.get_style_context().add_class("fg-list")
         for i, (title, xalign, expand) in enumerate(columns):
             renderer = Gtk.CellRendererText(xalign=xalign)
             col = Gtk.TreeViewColumn(title, renderer, text=i, weight=self.ncols + 1)
@@ -1240,6 +1347,7 @@ class ProcTable(Gtk.Box):
         self.view.connect("query-tooltip", self._on_tooltip)
 
         scroller = Gtk.ScrolledWindow()
+        scroller.get_style_context().add_class("fg-list")
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_min_content_height(26 + rows_visible * 24)
         scroller.add(self.view)
@@ -1883,7 +1991,7 @@ class HistoryPage(Gtk.Box):
 
         self.store = Gtk.TreeStore(str, str, str, str, str, str, str, int)
         self.view = Gtk.TreeView(model=self.store)
-        self.view.get_style_context().add_class("fg-ink")
+        self.view.get_style_context().add_class("fg-list")
         for i, (title, xalign, expand) in enumerate((
             (t("col.time"), 0.0, False), (t("col.level"), 0.0, False),
             (t("col.mem_free"), 1.0, False), (t("col.psi_full"), 1.0, False),
@@ -1896,6 +2004,7 @@ class HistoryPage(Gtk.Box):
             col.set_expand(expand)
             self.view.append_column(col)
         scroller = Gtk.ScrolledWindow()
+        scroller.get_style_context().add_class("fg-list")
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.set_min_content_height(150)
         scroller.add(self.view)
@@ -2030,6 +2139,7 @@ class LogPage(Gtk.Box):
         self.pack_start(bar, False, False, 0)
 
         self.view = Gtk.TextView(editable=False, cursor_visible=False)
+        self.view.get_style_context().add_class("fg-log")
         self.view.set_monospace(True)
         self.view.set_left_margin(8)
         self.view.set_right_margin(8)
@@ -2038,6 +2148,7 @@ class LogPage(Gtk.Box):
                                pixels_above_lines=10, pixels_below_lines=4)
         self.buffer.create_tag("dim", style=Pango.Style.ITALIC)
         scroller = Gtk.ScrolledWindow()
+        scroller.get_style_context().add_class("fg-log")
         scroller.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
         scroller.add(self.view)
         self.pack_start(card(t("card.log"), scroller), True, True, 0)
@@ -2131,6 +2242,8 @@ class SimPage(Gtk.Box):
 class SettingsPage(Gtk.Box):
     INTERVALS = (1.0, 2.0, 5.0, 10.0, 30.0)
     COOLDOWNS = (60.0, 300.0, 900.0, 3600.0)
+    THEMES = (("auto", "appearance.auto"), ("light", "appearance.light"),
+              ("dark", "appearance.dark"))
     LANGS = (("en", "English"), ("de", "Deutsch"))
     LEVELS = ((YELLOW, "level.raised"), (ORANGE, "level.warning"),
               (RED, "level.critical"))
@@ -2150,6 +2263,16 @@ class SettingsPage(Gtk.Box):
         self.lang_combo.set_active([c for c, _n in self.LANGS].index(settings["lang"]))
         self.lang_combo.connect("changed", self._on_lang)
         row = self._add(grid, row, t("set.language"), self.lang_combo)
+
+        self.theme_combo = Gtk.ComboBoxText()
+        for _code, key in self.THEMES:
+            self.theme_combo.append_text(t(key))
+        modes = [code for code, _k in self.THEMES]
+        self.theme_combo.set_active(modes.index(settings["theme"])
+                                    if settings["theme"] in modes else 0)
+        self.theme_combo.connect("changed", self._on_theme)
+        row = self._add(grid, row, t("set.appearance"), self.theme_combo,
+                        t("set.appearance_hint"))
 
         self.interval_combo = Gtk.ComboBoxText()
         for sec in self.INTERVALS:
@@ -2245,6 +2368,14 @@ class SettingsPage(Gtk.Box):
         code = self.LANGS[max(0, combo.get_active())][0]
         self.settings.set("lang", code)
         self.on_change("lang", code)
+
+    def _on_theme(self, combo):
+        if self._loading:
+            return
+        mode = self.THEMES[max(0, combo.get_active())][0]
+        self.settings.set("theme", mode)
+        self.on_change("theme", mode)
+        self._saved()
 
     def _on_interval(self, combo):
         if self._loading:
@@ -2431,7 +2562,8 @@ class Window(Gtk.Window):
         self.control = None         # answers a second start, see main()
         self.set_default_size(1200, 820)
         self.set_icon_name("utilities-system-monitor")
-        apply_theme(self)
+        apply_appearance(settings["theme"])
+        apply_theme(self, settings["theme"])
 
         self.ncpu = os.cpu_count() or 1
         self._level = None
@@ -2572,7 +2704,15 @@ class Window(Gtk.Window):
 
     # -- plumbing -----------------------------------------------------------
     def _retheme(self):
-        apply_theme(self)
+        """The desktop theme changed. Only relevant while we follow it."""
+        if self.settings["theme"] != "auto":
+            return
+        apply_theme(self, "auto")
+        self.queue_draw()
+
+    def _apply_appearance(self, mode):
+        apply_appearance(mode)
+        apply_theme(self, mode)
         self.queue_draw()
 
     def _on_pause(self, btn):
@@ -2593,6 +2733,8 @@ class Window(Gtk.Window):
         if key == "lang":
             LANG = value
             self._rebuild_for_language()
+        elif key == "theme":
+            self._apply_appearance(value)
         elif key == "interval":
             self.poller.interval = value
 
@@ -2873,6 +3015,8 @@ def main():
     ap.add_argument("--file", default=None, help="recording for the History page")
     ap.add_argument("--lang", choices=sorted(STR), default=None,
                     help="en or de (default from the settings)")
+    ap.add_argument("--theme", choices=THEME_MODES, default=None,
+                    help="auto, light or dark (default from the settings)")
     ap.add_argument("--page", choices=Window.PAGES, default="live",
                     help="page to start on")
     ap.add_argument("--window", action="store_true",
@@ -2888,6 +3032,8 @@ def main():
         settings.data["history_file"] = args.file
     if args.lang:
         settings.data["lang"] = args.lang
+    if args.theme:
+        settings.data["theme"] = args.theme
     LANG = settings["lang"]
 
     if not os.path.exists("/proc/pressure/memory"):

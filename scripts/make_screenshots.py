@@ -42,7 +42,7 @@ PAGES = {
     "history": ("history", 4, False),
     "log": ("log", 6, False),
     "sim": ("simulation", 4, False),
-    "settings": ("settings", 2, True),
+    "settings": ("settings", 8, True),
 }
 
 TOOLS = ("gnome-screenshot", "xdotool", "wmctrl")
@@ -171,9 +171,12 @@ def shoot(page, history_file, dark, suffix):
     name, settle, pristine = PAGES[page]
     target = OUT_DIR / f"{name}{suffix}.png"
     env = dict(os.environ)
-    if dark:
-        env["GTK_THEME"] = "Mint-Y-Dark"
     command = [sys.executable, str(GUI), "--window", "--page", page]
+    # Only force the palette for the dark shots. Light is the session default
+    # here, and forcing it would make the settings page document "Light" where
+    # the shipped value is "Auto".
+    if dark:
+        command += ["--theme", "dark"]
     if pristine:
         # real defaults: shipped interval, real recording path, real config path
         command += ["--interval", "5"]
@@ -213,7 +216,7 @@ def main():
     parser.add_argument("pages", nargs="*", choices=list(PAGES), default=list(PAGES),
                         help="pages to capture (default: all)")
     parser.add_argument("--dark", action="store_true",
-                        help="capture with the dark palette")
+                        help="capture with the dark palette (--theme dark)")
     args = parser.parse_args()
 
     check_environment()

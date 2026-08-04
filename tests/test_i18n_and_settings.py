@@ -125,9 +125,20 @@ class TestSettings(unittest.TestCase):
         G.CONFIG_DIR, G.CONFIG_FILE, G.AUTOSTART_FILE = self._saved
         self.tmp.cleanup()
 
+    def test_theme_defaults_to_auto_and_rejects_nonsense(self) -> None:
+        self.assertEqual(G.Settings()["theme"], "auto")
+        for value in ("dark", "light", "auto"):
+            with open(G.CONFIG_FILE, "w") as f:
+                json.dump({"theme": value}, f)
+            self.assertEqual(G.Settings()["theme"], value)
+        with open(G.CONFIG_FILE, "w") as f:
+            json.dump({"theme": "neon"}, f)
+        self.assertEqual(G.Settings()["theme"], "auto")
+
     def test_defaults_are_the_documented_ones(self) -> None:
         settings = G.Settings()
         self.assertEqual(settings["lang"], "en")
+        self.assertEqual(settings["theme"], "auto")
         self.assertEqual(settings["interval"], 5.0)
         self.assertTrue(settings["start_in_tray"])
         self.assertTrue(settings["auto_open"])

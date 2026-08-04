@@ -8,8 +8,10 @@ the axis maximum very much is.
 
 from __future__ import annotations
 
+import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from tests.fg_test_utils import gui_testable, has_gtk, load_gui, pump
 
@@ -258,3 +260,91 @@ class TestTheme(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(gui_testable(), "needs GTK and a display")
+class TestAppearanceModes(unittest.TestCase):
+    """Auto, light and dark as an explicit choice, not only as detection."""
+
+    def setUp(self) -> None:
+        self.window = Gtk.OffscreenWindow()
+        self._saved_dirs = G.THEME_DIRS
+        self._saved_original = G._original_appearance
+
+    def tearDown(self) -> None:
+        G.THEME_DIRS = self._saved_dirs
+        G._original_appearance = self._saved_original
+        G.apply_appearance("auto")
+        G.apply_theme(self.window, "auto")
+
+    def test_explicit_modes_ignore_detection(self) -> None:
+        """A user who picks dark gets dark, whatever the desktop says."""
+        original = G.detect_dark
+        try:
+            G.detect_dark = lambda _w: False
+            G.apply_theme(self.window, "dark")
+            self.assertEqual(G.PAL["surface"], G.DARK["surface"])
+            G.detect_dark = lambda _w: True
+            G.apply_theme(self.window, "light")
+            self.assertEqual(G.PAL["surface"], G.LIGHT["surface"])
+        finally:
+            G.detect_dark = original
+
+    def test_auto_follows_detection(self) -> None:
+        original = G.detect_dark
+        try:
+            for detected, expected in ((True, G.DARK), (False, G.LIGHT)):
+                G.detect_dark = lambda _w, value=detected: value
+                G.apply_theme(self.window, "auto")
+                self.assertEqual(G.PAL["surface"], expected["surface"])
+        finally:
+            G.detect_dark = original
+
+    def test_modes_are_the_documented_three(self) -> None:
+        self.assertEqual(G.THEME_MODES, ("auto", "light", "dark"))
+        self.assertEqual([code for code, _k in G.SettingsPage.THEMES],
+                         list(G.THEME_MODES))
+
+    def test_dark_sets_the_gtk_hint(self) -> None:
+        settings = Gtk.Settings.get_default()
+        G.apply_appearance("dark")
+        self.assertTrue(settings.get_property("gtk-application-prefer-dark-theme"))
+        G.apply_appearance("light")
+        self.assertFalse(settings.get_property("gtk-application-prefer-dark-theme"))
+
+    def test_auto_restores_what_the_session_had(self) -> None:
+        settings = Gtk.Settings.get_default()
+        before = settings.get_property("gtk-theme-name")
+        G.apply_appearance("dark")
+        G.apply_appearance("auto")
+        self.assertEqual(settings.get_property("gtk-theme-name"), before)
+
+    def test_a_theme_with_dark_css_needs_no_rename(self) -> None:
+        """prefer-dark is the clean route; renaming themes is the fallback."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Cosy" / "gtk-3.0").mkdir(parents=True)
+            (root / "Cosy" / "gtk-3.0" / "gtk-dark.css").write_text("")
+            G.THEME_DIRS = (root,)
+            self.assertTrue(G.theme_ships_dark_css("Cosy"))
+            self.assertIsNone(G.sibling_theme("Cosy", want_dark=True))
+
+    def test_dark_twin_is_found_by_name(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            for name in ("Mint-Y-Aqua", "Mint-Y-Dark-Aqua", "Mint-Y", "Mint-Y-Dark"):
+                (root / name / "gtk-3.0").mkdir(parents=True)
+            G.THEME_DIRS = (root,)
+            self.assertEqual(G.sibling_theme("Mint-Y-Aqua", True), "Mint-Y-Dark-Aqua")
+            self.assertEqual(G.sibling_theme("Mint-Y", True), "Mint-Y-Dark")
+            self.assertEqual(G.sibling_theme("Mint-Y-Dark-Aqua", False), "Mint-Y-Aqua")
+            self.assertEqual(G.sibling_theme("Mint-Y-Dark", False), "Mint-Y")
+
+    def test_no_twin_is_not_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "Lonely" / "gtk-3.0").mkdir(parents=True)
+            G.THEME_DIRS = (root,)
+            self.assertIsNone(G.sibling_theme("Lonely", True))
+            self.assertIsNone(G.sibling_theme("Lonely", False))
+            G.apply_appearance("dark")   # must not raise

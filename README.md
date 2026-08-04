@@ -201,6 +201,14 @@ Eigenschaften, die im Ernstfall zählen:
 
 - **Sprache Englisch/Deutsch**, Standard Englisch, umschaltbar im Menü und in den
   Einstellungen. Die Oberfläche baut sich sofort neu auf, ohne Neustart.
+- **Erscheinungsbild Auto / Hell / Dunkel** in den Einstellungen, sofort wirksam.
+  „Auto" folgt dem Desktop-Thema. Die Wahl geht auch an GTK weiter
+  (`gtk-application-prefer-dark-theme`, bei Themen ohne dunkles Stylesheet der
+  passende Zwilling wie `Mint-Y-Aqua` → `Mint-Y-Dark-Aqua`) — sonst wären nur
+  meine Karten dunkel und die Listen blieben hell, was nicht themengerecht
+  aussieht, sondern kaputt. Listen und Protokoll tragen zusätzlich die eigene
+  Palette: die Textfarbe wird ohnehin erzwungen, und ein Thema, das seinen hellen
+  Grund für Listen behält, ergäbe weiße Schrift auf Weiß.
 - **Start in der Systemleiste** (Standard). Das Symbol trägt die Stufe als Farbe
   und den freien Speicher als Text. Auf Cinnamon läuft das über XApp — das ist
   das einzige Backend dort, das den Text neben dem Symbol wirklich anzeigt;
