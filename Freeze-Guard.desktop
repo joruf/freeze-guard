@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Freeze Guard
+GenericName=Freeze protection monitor
+Comment=Watch memory pressure and warn before the machine freezes
+Comment[de]=Speicherdruck überwachen und warnen, bevor der Rechner einfriert
+# %k is this .desktop file, so ./run.py is always the one in the same folder.
+Exec=/bin/bash -c "cd \\$(dirname \\$(readlink -f \\$0)) && exec python3 ./run.py" %k
+Icon=freeze-guard
+Terminal=false
+Categories=System;Monitor;
+Keywords=memory;freeze;OOM;swap;monitor;Speicher;
+StartupNotify=false
