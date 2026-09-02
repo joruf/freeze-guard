@@ -9,7 +9,7 @@ Comment[de]=Speicherdruck überwachen und warnen, bevor der Rechner einfriert
 # folder was copied to. The same path repairs Icon= in place: a .desktop file cannot point at its
 # icon with a relative path (the spec reads one as a theme name), so the launcher writes the
 # absolute path of the icon next to it whenever the folder has moved.
-Exec=/bin/bash -c "s=\\$(readlink -f \\"\\$0\\"); d=\\${s%/*}; i=\\$d/resources/freeze-guard.svg; grep -qxF \\"Icon=\\$i\\" \\"\\$s\\" || { I=\\$i awk '/^Icon=/{print \\"Icon=\\" ENVIRON[\\"I\\"]; next}1' \\"\\$s\\" > \\"\\$s.new\\" && mv -f \\"\\$s.new\\" \\"\\$s\\"; }; cd \\"\\$d\\" && exec python3 ./run.py" %k
+Exec=/bin/bash -c "s=\\$(readlink -f \\"\\$0\\"); d=\\${s%%/*}; i=\\$d/resources/freeze-guard.svg; grep -qxF \\"Icon=\\$i\\" \\"\\$s\\" || { I=\\$i awk '/^Icon=/{print \\"Icon=\\" ENVIRON[\\"I\\"]; next}1' \\"\\$s\\" > \\"\\$s.new\\" && mv -f \\"\\$s.new\\" \\"\\$s\\"; }; cd \\"\\$d\\" && exec python3 ./run.py" %k
 Icon=/home/joruf/Applications/freeze-guard/resources/freeze-guard.svg
 Terminal=false
 Categories=System;Monitor;
