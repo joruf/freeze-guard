@@ -12,7 +12,7 @@ What it does:
 
 1. creates a private build environment in ``build/exe/venv`` without the system
    packages, so nothing the build machine happens to have ends up in the file,
-   with the system's PyGObject linked in, which pip cannot install,
+   with the system's PyGObject and pycairo (the drawing widgets need it) linked in, which pip cannot install,
 2. installs PyInstaller,
 3. writes the VERSION file from the commit history (what ``version.py --write``
    does) and stages it as data together with ``run-monitor.py``, which the window loads by path,
@@ -22,7 +22,7 @@ What it does:
 Only the dashboard and the recorder are in the file. The protection itself (zram,
 earlyoom, kernel settings, the daemon and the systemd units) is installed from a checkout with
 ``sudo ./install.sh``; a single file cannot do that. Build machine: ``sudo apt install
-python3-venv python3-tk python3-gi gir1.2-gtk-3.0`` (plus ``gir1.2-xapp-1.0`` and
+python3-venv python3-tk python3-gi python3-gi-cairo gir1.2-gtk-3.0`` (plus ``gir1.2-xapp-1.0`` and
 ``gir1.2-ayatanaappindicator3-0.1`` for the tray icon), run with the system Python, because only
 it can see PyGObject.
 
@@ -79,7 +79,11 @@ DATA_FILES: List[str] = ['run-monitor.py', 'resources']
 SUBMODULE_PACKAGES: List[str] = []
 
 #: Modules imported only in ways PyInstaller cannot follow (inside functions, by name, by path).
-HIDDEN_IMPORTS: List[str] = ['bootstrap_ui', 'fg_instance', 'fg_platform', 'version', 'exe_support', 'curses', 'tkinter', 'tkinter.scrolledtext']
+HIDDEN_IMPORTS: List[str] = ['bootstrap_ui', 'fg_instance', 'fg_platform', 'version', 'exe_support', 'curses', 'tkinter', 'tkinter.scrolledtext', 'cairo']
+
+#: System Python packages, as {module: pip name}, linked into the build environment because pip
+#: cannot install them (PyGObject needs the GObject libraries, pycairo needs cairo's headers).
+SYSTEM_PACKAGES = {'gi': 'pygobject', 'cairo': 'pycairo'}
 
 #: The GTK modules the program loads lazily or by name.
 GI_MODULES: List[str] = ['gi.repository.Gtk', 'gi.repository.Gdk', 'gi.repository.Gio', 'gi.repository.GLib', 'gi.repository.Pango', 'gi.repository.XApp', 'gi.repository.AyatanaAppIndicator3']
@@ -189,8 +193,9 @@ def check_build_host() -> None:
         import tkinter  # noqa: F401
     except ImportError:
         fail("tkinter is missing - sudo apt install python3-tk")
-    if system_gi() is None:
-        fail("PyGObject is missing - sudo apt install python3-gi gir1.2-gtk-3.0")
+    for module in SYSTEM_PACKAGES:
+        if system_package(module) is None:
+            fail("{0} is missing - sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0".format(module))
 
 
 def prepare_venv(clean: bool, keep: bool) -> None:
@@ -212,26 +217,27 @@ def prepare_venv(clean: bool, keep: bool) -> None:
     pip = [venv_python(), "-m", "pip", "install", "--upgrade", "--disable-pip-version-check", "--no-cache-dir"]
     run(pip + ["pip"])
     run(pip + [PYINSTALLER_SPEC] + RUNTIME_PACKAGES)
-    gi = system_gi()
-    if gi is None:
-        fail("PyGObject is missing - sudo apt install python3-gi gir1.2-gtk-3.0")
-    # The package and its metadata: PyInstaller's hook reads the version.
-    sources = [gi]
-    try:
-        sources.append(Path(str(importlib.metadata.distribution("pygobject")._path)))
-    except (importlib.metadata.PackageNotFoundError, AttributeError):
-        info("WARNING: no PyGObject metadata found - PyInstaller may reject the build.")
     site = venv_site_packages()
-    for source in sources:
-        link = site / source.name
-        if not link.exists():
-            info("Linking the system {0} into the build environment ...".format(source.name))
-            link.symlink_to(source, target_is_directory=True)
+    for module, distribution in SYSTEM_PACKAGES.items():
+        package = system_package(module)
+        if package is None:
+            fail("{0} is missing - sudo apt install python3-gi python3-gi-cairo gir1.2-gtk-3.0".format(module))
+        # The package and its metadata: PyInstaller's hook reads the version.
+        sources = [package]
+        try:
+            sources.append(Path(str(importlib.metadata.distribution(distribution)._path)))
+        except (importlib.metadata.PackageNotFoundError, AttributeError):
+            info("WARNING: no {0} metadata found - PyInstaller may reject the build.".format(distribution))
+        for source in sources:
+            link = site / source.name
+            if not link.exists():
+                info("Linking the system {0} into the build environment ...".format(source.name))
+                link.symlink_to(source, target_is_directory=True)
 
 
-def system_gi() -> Optional[Path]:
-    """Return the PyGObject package of this interpreter, or ``None``."""
-    spec = importlib.util.find_spec("gi")
+def system_package(module: str) -> Optional[Path]:
+    """Return the package of this interpreter that provides ``module``, or ``None``."""
+    spec = importlib.util.find_spec(module)
     if spec is None or not spec.submodule_search_locations:
         return None
     return Path(list(spec.submodule_search_locations)[0])

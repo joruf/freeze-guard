@@ -139,7 +139,7 @@ It is the dashboard and the recorder only: the window, `--monitor` (the terminal
 Build it yourself from a full clone (the version is counted from the commit history), with the system Python (only it can see PyGObject):
 
 ```bash
-sudo apt install python3-venv python3-tk python3-gi gir1.2-gtk-3.0
+sudo apt install python3-venv python3-tk python3-gi python3-gi-cairo gir1.2-gtk-3.0
 /usr/bin/python3 build-exe.py            # --clean rebuilds the build environment, --keep-env reuses it
 ```
 
