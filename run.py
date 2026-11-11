@@ -10,6 +10,10 @@ incident. Installed as the command `fg-gui`.
   freeze-guard monitor   the same data in a terminal
   freeze-guard           asks which of the two
 
+The single-file executable has no freeze-guard command: it starts this window, and
+`--monitor [options]` runs the terminal dashboard (or `--monitor --log`, the recorder).
+`--version` prints the version.
+
 Sampling happens in a background thread (only /proc reads, no subprocess per
 tick); the GTK main loop paints and nothing else.
 
@@ -40,6 +44,7 @@ from pathlib import Path
 # shows the work as it happens; see bootstrap_ui.py. `--setup` opens that window even when nothing
 # is missing, which is how to see what is installed.
 from bootstrap_ui import Need, ensure  # noqa: E402
+import exe_support  # noqa: E402
 
 NEEDS = (
     Need(label="GTK 3 bindings for Python", module="gi",
@@ -59,9 +64,23 @@ NEEDS = (
          optional=True, note="there are no desktop notifications"),
 )
 
+# In the single-file executable a Python package the program imports is either packed into the file
+# or not there at all - a system package cannot supply it, so there is nothing to offer for it.
+if exe_support.IS_FROZEN:
+    NEEDS = tuple(need for need in NEEDS if not need.module or need.module == "gi")
+
 # Only when the application is actually being started. Importing this module — which the test
 # suite does — should not check anything, let alone put an installer window on screen.
 if __name__ == "__main__":
+    # Answered before anything is checked or imported: no display, no GTK needed.
+    if "--version" in sys.argv[1:]:
+        import version
+
+        print(version.banner("Freeze Guard"))
+        raise SystemExit(0)
+
+    exe_support.use_system_environment_for_children()
+
     # Taken out of the arguments once it has been read, so the application's own parser does
     # not trip over a flag that was never meant for it.
     _SETUP = "--setup" in sys.argv
@@ -69,7 +88,8 @@ if __name__ == "__main__":
     if _SETUP:
         sys.argv.remove("--setup")
 
-    if not ensure("Freeze Guard", NEEDS, force=_SETUP):
+    # The terminal dashboard needs none of the window's tools: no installer window in front of it.
+    if sys.argv[1:2] != ["--monitor"] and not ensure("Freeze Guard", NEEDS, force=_SETUP):
         raise SystemExit(1)
 
 
@@ -169,7 +189,10 @@ CSV_LEVEL_KEY = {"OK": "level.ok", "ERHOEHT": "level.raised",
 HISTORY_FILE = M.HISTORY_FILE
 APP_DIR = os.path.dirname(os.path.realpath(__file__))
 INSTALL_SH = os.path.join(APP_DIR, "install.sh")
-INSTALL_CMD = f"sudo {INSTALL_SH}"
+# The single-file executable carries neither install.sh nor the daemon: the protection is
+# installed from a checkout, so that is the command shown.
+INSTALL_CMD = ("git clone https://github.com/joruf/freeze-guard.git && sudo freeze-guard/install.sh"
+               if exe_support.IS_FROZEN else f"sudo {INSTALL_SH}")
 CONFIG_HOME = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
 CONFIG_DIR = os.path.join(CONFIG_HOME, "freeze-guard")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "settings.json")
@@ -2843,14 +2866,17 @@ class Window(Gtk.Window):
         kill_process(pid, comm, self.status)
 
     def open_console(self):
-        target = os.path.join(APP_DIR, "run-monitor.py")
-        if not os.path.exists(target):
-            target = "fg-monitor"
+        target = [os.path.join(APP_DIR, "run-monitor.py")]
+        if exe_support.IS_FROZEN:
+            # No file to run: the executable itself shows the dashboard with --monitor.
+            target = [exe_support.executable(), "--monitor"]
+        elif not os.path.exists(target[0]):
+            target = ["fg-monitor"]
         for term, arg in (("x-terminal-emulator", "-e"), ("gnome-terminal", "--"),
                           ("xfce4-terminal", "-x"), ("xterm", "-e")):
             if GLib.find_program_in_path(term):
                 try:
-                    subprocess.Popen([term, arg, target], start_new_session=True)
+                    subprocess.Popen([term, arg, *target], start_new_session=True)
                     return
                 except OSError:
                     continue
@@ -3042,6 +3068,13 @@ def report_already_running(focused_existing, owner_pid):
 
 def main():
     global LANG
+    if sys.argv[1:2] == ["--monitor"]:
+        # The terminal dashboard and the recorder (run-monitor.py) with the rest of the arguments,
+        # for the single-file executable, which has no second command to start.
+        sys.argv[1:2] = []
+        sys.argv[0] = "fg-monitor"
+        M.main()
+        return
     set_process_name("fg-gui")
     settings = Settings()
     ap = argparse.ArgumentParser(

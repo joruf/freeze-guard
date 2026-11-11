@@ -1,0 +1,97 @@
+name: Executable
+
+# Builds the single-file Linux executable with build-exe.py and publishes it as
+# a GitHub release with the tag v<version>-build<build>. The one asset is named
+# freeze-guard-linux-x86_64-<version>-build<build>: the Loresoft site parses that name.
+#
+# The version is derived from the commit history (version.py), so the build
+# number changes with every commit: every push to main gets its own release.
+# Run it by hand to rebuild the current one. The full history is fetched, or the
+# numbers would be wrong.
+# Freeze Guard is Linux only (it reads /proc/pressure and manages systemd units),
+# so there is no Windows build.
+on:
+  # By hand only (Actions -> Executable -> Run workflow): the file is the dashboard and the
+  # recorder, not the protection, so it is not published on every push. Add the push trigger
+  # (push: branches: [main]) once a release of just the dashboard is wanted.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    strategy:
+      # One failing system must not take another one's file with it: the release
+      # below publishes whatever was built.
+      fail-fast: false
+      matrix:
+        # The oldest supported Ubuntu: the file runs on every system with the same
+        # or a newer glibc, never on an older one.
+        os: [ubuntu-22.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          # The whole history.
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-venv python3-tk python3-gi gir1.2-gtk-3.0 librsvg2-common
+
+      # Optional typelibs: the program works without them, with less.
+      - name: Install optional build dependencies
+        run: sudo apt-get install -y gir1.2-xapp-1.0 gir1.2-ayatanaappindicator3-0.1 || true
+
+      # The system Python, not setup-python: only it can see PyGObject (pip cannot install it).
+      - name: Build
+        run: /usr/bin/python3 build-exe.py
+
+      - name: Keep the executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: exe-${{ matrix.os }}
+          path: dist/freeze-guard-linux-*
+          if-no-files-found: error
+
+  release:
+    name: Publish the release
+    needs: build
+    # Also when a build failed, as long as the run was not cancelled.
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Collect the executable
+        uses: actions/download-artifact@v4
+        with:
+          pattern: exe-*
+          path: dist
+          merge-multiple: true
+
+      - name: Create or refresh the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The tag comes from the file name, so the tag and the asset can never disagree.
+          FILE=$(ls dist/freeze-guard-linux-x86_64-*-build* | head -n 1)
+          REST="${FILE##*/freeze-guard-linux-x86_64-}"
+          VERSION="${REST%%-build*}"
+          BUILD="${REST##*-build}"
+          TAG="v${VERSION}-build${BUILD}"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/freeze-guard-linux-* --clobber
+          else
+            gh release create "$TAG" dist/freeze-guard-linux-* \
+              --target "$GITHUB_SHA" \
+              --title "Freeze Guard ${VERSION} (${BUILD})" \
+              --notes "Single-file Linux executable built by build-exe.py on Ubuntu 22.04: the dashboard and the recorder only. Make the file executable (chmod +x) and start it. The protection itself (zram, earlyoom, systemd units) is installed from a checkout with sudo ./install.sh."
+          fi

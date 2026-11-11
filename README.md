@@ -130,6 +130,21 @@ sudo ~/Applications/freeze-guard/install.sh
 
 Kein Neustart nötig. Der alte `hang-watchdog` wird dabei entfernt.
 
+## Executable
+
+A single-file Linux executable (x86_64, built on Ubuntu 22.04, runs on the same or a newer glibc) can be built with `build-exe.py`, and the GitHub Actions workflow `release-exe.yml` (started by hand) publishes it on the [Releases page](https://github.com/joruf/freeze-guard/releases) as `freeze-guard-linux-x86_64-<version>-build<build>`. Make it executable (`chmod +x`) and start it.
+
+It is the dashboard and the recorder only: the window, `--monitor` (the terminal dashboard; `--monitor --log` is the recorder) and `--version`. The protection itself (zram, earlyoom, kernel settings, the daemon and the systemd units) cannot be installed from a single file. It needs a checkout and `sudo ./install.sh`, and the window shows that command where the protection is missing.
+
+Build it yourself from a full clone (the version is counted from the commit history), with the system Python (only it can see PyGObject):
+
+```bash
+sudo apt install python3-venv python3-tk python3-gi gir1.2-gtk-3.0
+/usr/bin/python3 build-exe.py            # --clean rebuilds the build environment, --keep-env reuses it
+```
+
+The result is `dist/freeze-guard-linux-x86_64-<version>-build<build>`.
+
 ## Bedienung — Konsole oder Fenster, freie Wahl
 
 ```bash
